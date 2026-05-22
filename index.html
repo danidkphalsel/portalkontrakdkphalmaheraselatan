@@ -1,0 +1,323 @@
+/**
+ * Konfigurasi Utama Web App
+ */
+function doGet(e) {
+  return HtmlService.createTemplateFromFile('Index')
+    .evaluate()
+    .setTitle('Portal Kontrak DKP Halmahera Selatan')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+/**
+ * Setup Database Otomatis
+ */
+function setupDatabase() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const contractHeaders = ['id', 'no_kontrak', 'tahun_anggaran', 'pekerjaan', 'rekanan', 'nilai', 'tgl_mulai', 'tgl_selesai', 'status', 'bidang', 'link_drive', 'created_at'];
+  const archiveHeaders = ['id', 'no_kontrak', 'tahun_anggaran', 'pekerjaan', 'rekanan', 'nilai', 'tgl_mulai', 'tgl_selesai', 'status', 'bidang', 'link_drive', 'archived_at'];
+  const userHeaders = ['username', 'password', 'fullname', 'role'];
+  
+  let sheetKontrak = ss.getSheetByName('Kontrak');
+  if (!sheetKontrak) {
+    sheetKontrak = ss.insertSheet('Kontrak');
+    sheetKontrak.appendRow(contractHeaders);
+    sheetKontrak.setFrozenRows(1);
+  } else {
+    syncHeaders(sheetKontrak, contractHeaders);
+  }
+  
+  let sheetArsip = ss.getSheetByName('Arsip');
+  if (!sheetArsip) {
+    sheetArsip = ss.insertSheet('Arsip');
+    sheetArsip.appendRow(archiveHeaders);
+    sheetArsip.setFrozenRows(1);
+  } else {
+    syncHeaders(sheetArsip, archiveHeaders);
+  }
+
+  let sheetUsers = ss.getSheetByName('Users');
+  if (!sheetUsers) {
+    sheetUsers = ss.insertSheet('Users');
+    sheetUsers.appendRow(userHeaders);
+    sheetUsers.appendRow(['admin', 'Demo2026!', 'Super Admin', 'Admin']);
+    sheetUsers.appendRow(['staff', 'Demo2026!', 'Staff User', 'Staff']);
+    sheetUsers.setFrozenRows(1);
+  } else {
+    syncHeaders(sheetUsers, userHeaders);
+  }
+  
+  return "Database Berhasil Disinkronisasi!";
+}
+
+function syncHeaders(sheet, requiredHeaders) {
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  requiredHeaders.forEach(function(h) {
+    if (headers.indexOf(h) === -1) {
+      sheet.getRange(1, headers.length + 1).setValue(h);
+      headers.push(h);
+    }
+  });
+}
+
+function loginUser(username, password) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Users');
+  if (!sheet) return { success: false, message: 'Database User tidak ditemukan.' };
+  const data = sheet.getDataRange().getValues();
+  const map = getColumnMap(sheet);
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][map['username']]) === String(username) && 
+        String(data[i][map['password']]) === String(password)) {
+      return { success: true, user: { username: data[i][map['username']], fullname: data[i][map['fullname']], role: data[i][map['role']] } };
+    }
+  }
+  return { success: false, message: 'Username atau Password salah!' };
+}
+
+function getContracts() {
+  return getContractsFromSheet('Kontrak');
+}
+
+function getArchiveData() {
+  return getContractsFromSheet('Arsip');
+}
+
+function getUsersList() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Users');
+  if (!sheet) return [];
+  const data = sheet.getDataRange().getValues();
+  const map = getColumnMap(sheet);
+  const result = [];
+  for (let i = 1; i < data.length; i++) {
+    result.push({ username: data[i][map['username']], password: data[i][map['password']], fullname: data[i][map['fullname']], role: data[i][map['role']] });
+  }
+  return result;
+}
+
+function saveContract(payload) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('Kontrak');
+    const map = getColumnMap(sheet);
+    if (payload.isEdit === 'true') {
+      const data = sheet.getDataRange().getValues();
+      let rowIndex = -1;
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][map['id']]) === String(payload.dataId)) { rowIndex = i + 1; break; }
+      }
+      if (rowIndex !== -1) { updateContractRow(sheet, rowIndex, map, payload); }
+    } else {
+      const newId = Date.now();
+      const newRow = new Array(Object.keys(map).length);
+      newRow[map['id']] = newId;
+      newRow[map['no_kontrak']] = payload.no_kontrak;
+      newRow[map['tahun_anggaran']] = payload.tahun_anggaran;
+      newRow[map['pekerjaan']] = payload.pekerjaan;
+      newRow[map['rekanan']] = payload.rekanan;
+      newRow[map['nilai']] = payload.nilai;
+      newRow[map['tgl_mulai']] = payload.tgl_mulai;
+      newRow[map['tgl_selesai']] = payload.tgl_selesai;
+      newRow[map['status']] = payload.status;
+      newRow[map['bidang']] = payload.bidang;
+      newRow[map['link_drive']] = payload.link_drive;
+      newRow[map['created_at']] = new Date();
+      sheet.appendRow(newRow);
+    }
+    return { success: true };
+  } catch (e) { return { success: false, message: e.toString() }; } finally { lock.releaseLock(); }
+}
+
+function archiveContract(id) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheetKontrak = ss.getSheetByName('Kontrak');
+    const sheetArsip = ss.getSheetByName('Arsip');
+    const data = sheetKontrak.getDataRange().getValues();
+    const mapKontrak = getColumnMap(sheetKontrak);
+    const mapArsip = getColumnMap(sheetArsip);
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][mapKontrak['id']]) === String(id)) {
+        const rowData = data[i];
+        const newRow = new Array(Object.keys(mapArsip).length);
+        Object.keys(mapArsip).forEach(key => { if (mapKontrak[key] !== undefined) newRow[mapArsip[key]] = rowData[mapKontrak[key]]; });
+        newRow[mapArsip['status']] = 'Archived';
+        newRow[mapArsip['archived_at']] = new Date();
+        sheetArsip.appendRow(newRow);
+        sheetKontrak.deleteRow(i + 1);
+        break;
+      }
+    }
+    return { success: true };
+  } catch (e) { return { success: false, message: e.toString() }; } finally { lock.releaseLock(); }
+}
+
+function deleteContract(id) {
+  return deleteFromSheet(id, 'Kontrak');
+}
+
+function deleteArchiveContract(id) {
+  return deleteFromSheet(id, 'Arsip');
+}
+
+function deleteFromSheet(id, sheetName) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    const data = sheet.getDataRange().getValues();
+    const map = getColumnMap(sheet);
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][map['id']]) === String(id)) {
+        sheet.deleteRow(i + 1);
+        break;
+      }
+    }
+    return { success: true };
+  } catch (e) { return { success: false, message: e.toString() }; } finally { lock.releaseLock(); }
+}
+
+/**
+ * PDF GENERATION (Dijalankan dari Dashboard)
+ * Perbaikan: Menggunakan normalisasi string untuk filter data
+ */
+function generateReportPDF(bidang, tahun, source = 'Arsip') {
+  try {
+    const data = getContractsFromSheet(source); 
+    
+    const filtered = data.filter(function(x) {
+      // Normalisasi nilai untuk perbandingan yang aman (String + Trim)
+      const valBidangData = String(x.bidang || '').trim();
+      const valTahunData = String(x.tahun_anggaran || '').trim();
+      const valBidangFilter = String(bidang || '').trim();
+      const valTahunFilter = String(tahun || '').trim();
+
+      const matchBidang = (valBidangFilter === 'Semua' || valBidangData === valBidangFilter);
+      const matchTahun = (valTahunFilter === 'Semua' || valTahunData === valTahunFilter);
+      
+      return matchBidang && matchTahun;
+    });
+    
+    if (filtered.length === 0) {
+      return { success: false, message: 'Tidak ada data untuk kriteria tersebut (Bidang: ' + bidang + ', Tahun: ' + tahun + ').' };
+    }
+    
+    const titleLabel = source === 'Arsip' ? 'LAPORAN ARSIP KONTRAK' : 'REKAPITULASI KONTRAK AKTIF';
+
+    let html = '<html><head><style>' +
+      'body { font-family: sans-serif; color: #333; padding: 20px; }' +
+      '.header { text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 20px; }' +
+      'h2 { margin: 0; text-transform: uppercase; color: #0284c7; }' +
+      'p { margin: 5px 0; font-size: 12px; }' +
+      'table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 9px; }' +
+      'th, td { border: 1px solid #cbd5e1; padding: 8px; text-align: left; }' +
+      'th { background-color: #f1f5f9; font-weight: bold; color: #475569; text-align:center; }' +
+      '.nilai { text-align: right; }' +
+      '.footer { margin-top: 40px; font-size: 10px; text-align: right; color: #64748b; }' +
+      '</style></head><body>' +
+      '<div class="header"><h2>Dinas Kelautan dan Perikanan</h2><p>Kabupaten Halmahera Selatan</p><hr>' +
+      '<h3 style="margin-top:15px">' + titleLabel + '</h3>' +
+      '<p>Bidang: ' + bidang + ' | Tahun Anggaran: ' + tahun + '</p>' +
+      '<p>Tanggal Cetak: ' + Utilities.formatDate(new Date(), "GMT+8", "dd-MM-yyyy HH:mm") + '</p></div>' +
+      '<table><thead><tr><th style="width:25px">No</th><th style="width:35px">Thn</th><th>No. Kontrak</th><th>Pekerjaan</th><th>Rekanan</th><th>Bidang</th><th>Nilai (Rp)</th></tr></thead><tbody>';
+    
+    let totalNilai = 0;
+    filtered.forEach((item, index) => {
+      totalNilai += Number(item.nilai) || 0;
+      html += '<tr><td style="text-align:center">' + (index + 1) + '</td><td style="text-align:center">' + item.tahun_anggaran + '</td><td>' + item.no_kontrak + '</td><td>' + item.pekerjaan + '</td><td>' + item.rekanan + '</td><td>' + item.bidang + '</td><td class="nilai">' + Number(item.nilai).toLocaleString('id-ID') + '</td></tr>';
+    });
+    
+    html += '<tr><td colspan="6" style="text-align:right; font-weight:bold">TOTAL NILAI ANGGARAN</td><td class="nilai" style="font-weight:bold">' + totalNilai.toLocaleString('id-ID') + '</td></tr>';
+    html += '</tbody></table><div class="footer"><p>Dokumen otomatis oleh Portal Kontrak DKP HalSel</p></div></body></html>';
+    
+    const blob = HtmlService.createHtmlOutput(html).getAs('application/pdf');
+    return { 
+      success: true, 
+      pdfBase64: Utilities.base64Encode(blob.getBytes()), 
+      filename: titleLabel.replace(/\s+/g, '_') + '_' + tahun + '.pdf' 
+    };
+  } catch (e) { return { success: false, message: e.toString() }; }
+}
+
+function saveUser(payload) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Users');
+    const map = getColumnMap(sheet);
+    const data = sheet.getDataRange().getValues();
+    let rowIndex = -1;
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][map['username']]) === String(payload.username)) { rowIndex = i + 1; break; }
+    }
+    if (payload.isEdit === 'true') {
+      if (rowIndex === -1) return { success: false, message: 'User tidak ditemukan' };
+      sheet.getRange(rowIndex, map['fullname'] + 1).setValue(payload.fullname);
+      sheet.getRange(rowIndex, map['password'] + 1).setValue(payload.password);
+      sheet.getRange(rowIndex, map['role'] + 1).setValue(payload.role);
+    } else {
+      if (rowIndex !== -1) return { success: false, message: 'Username sudah digunakan' };
+      const newRow = new Array(Object.keys(map).length);
+      newRow[map['username']] = payload.username;
+      newRow[map['password']] = payload.password;
+      newRow[map['fullname']] = payload.fullname;
+      newRow[map['role']] = payload.role;
+      sheet.appendRow(newRow);
+    }
+    return { success: true };
+  } catch (e) { return { success: false, message: e.toString() }; } finally { lock.releaseLock(); }
+}
+
+function getColumnMap(sheet) {
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const map = {};
+  headers.forEach((h, i) => map[String(h).toLowerCase().trim()] = i);
+  return map;
+}
+
+function safeDateFormat(value) {
+  if (!value) return '';
+  if (value instanceof Date) return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  return String(value);
+}
+
+function updateContractRow(sheet, rowIndex, map, p) {
+  sheet.getRange(rowIndex, map['no_kontrak'] + 1).setValue(p.no_kontrak);
+  sheet.getRange(rowIndex, map['tahun_anggaran'] + 1).setValue(p.tahun_anggaran);
+  sheet.getRange(rowIndex, map['pekerjaan'] + 1).setValue(p.pekerjaan);
+  sheet.getRange(rowIndex, map['rekanan'] + 1).setValue(p.rekanan);
+  sheet.getRange(rowIndex, map['nilai'] + 1).setValue(p.nilai);
+  sheet.getRange(rowIndex, map['tgl_mulai'] + 1).setValue(p.tgl_mulai);
+  sheet.getRange(rowIndex, map['tgl_selesai'] + 1).setValue(p.tgl_selesai);
+  sheet.getRange(rowIndex, map['status'] + 1).setValue(p.status);
+  sheet.getRange(rowIndex, map['bidang'] + 1).setValue(p.bidang);
+  sheet.getRange(rowIndex, map['link_drive'] + 1).setValue(p.link_drive);
+}
+
+function getContractsFromSheet(sheetName) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  if (!sheet || sheet.getLastRow() <= 1) return [];
+  const map = getColumnMap(sheet);
+  const data = sheet.getDataRange().getValues();
+  const result = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    result.push({
+      id: row[map['id']],
+      no_kontrak: row[map['no_kontrak']],
+      tahun_anggaran: row[map['tahun_anggaran']] || '-',
+      pekerjaan: row[map['pekerjaan']],
+      rekanan: row[map['rekanan']],
+      nilai: row[map['nilai']],
+      tgl_mulai: safeDateFormat(row[map['tgl_mulai']]),
+      tgl_selesai: safeDateFormat(row[map['tgl_selesai']]),
+      status: row[map['status']],
+      bidang: row[map['bidang']] || 'Sekretariat',
+      link_drive: row[map['link_drive']] || ''
+    });
+  }
+  return result;
+}
